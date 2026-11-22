@@ -1,0 +1,184 @@
+name: AiSecBox dependency patch
+description: Apply an AiSecBox dependency patch plan with aisecbox-cli
+author: ARANOVA
+
+branding:
+  icon: shield
+  color: blue
+
+# Action compuesta (una sola step para el caller):
+#   - instala el binario de aisecbox-cli para el runner actual;
+#   - aplica el plan (o lo previsualiza con dry_run);
+#   - expone qué ficheros cambiaron y, opcionalmente, deja que el CLI abra el PR.
+#
+# No ejecuta tests ni build: eso lo hace el workflow del repo que la usa. Para
+# el flujo completo con gate (tests -> PR) usa el workflow reutilizable de
+# aisecbox-cli o replica el patrón "apply -> test -> open PR".
+#
+# Los secretos van por `env` en la step que usa la action, nunca por `with`:
+#   env:
+#     AISECBOX_API_KEY: ${{ secrets.AISECBOX_API_KEY }}
+#     GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}   # solo con create_pr: true
+
+inputs:
+  plan:
+    description: "Plan source: HTTPS URL of the gateway or a repo-relative file"
+    required: true
+  dry_run:
+    description: "Preview the plan without writing files (true/false)"
+    required: false
+    default: "false"
+  overrides:
+    description: "Override mode: auto or never"
+    required: false
+    default: "auto"
+  create_pr:
+    description: "Let the CLI open the GitHub PR (requires GITHUB_TOKEN and write permissions)"
+    required: false
+    default: "false"
+  working_directory:
+    description: "Directory to run in, relative to the repository root"
+    required: false
+    default: "."
+  debug:
+    description: "Enable AISECBOX_CLI_DEBUG (never enable it on public repositories)"
+    required: false
+    default: "false"
+  base_url:
+    description: "Base URL for the CLI artifacts (mirror with the same layout)"
+    required: false
+    default: "https://aisecbox.com/downloads"
+
+outputs:
+  changed:
+    description: "true when the plan modified files"
+    value: ${{ steps.patch.outputs.changed }}
+  changed_files:
+    description: "Newline-separated repository-relative files modified by the plan"
+    value: ${{ steps.patch.outputs.changed_files }}
+  applied:
+    description: "Number of applied patches (empty if the CLI output could not be parsed)"
+    value: ${{ steps.patch.outputs.applied }}
+  skipped:
+    description: "Number of skipped patches (empty if the CLI output could not be parsed)"
+    value: ${{ steps.patch.outputs.skipped }}
+  pr_url:
+    description: "Pull request URL when create_pr=true"
+    value: ${{ steps.patch.outputs.pr_url }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install aisecbox-cli
+      id: install
+      shell: bash
+      env:
+        AISECBOX_BASE_URL: ${{ inputs.base_url }}
+        AISECBOX_BIN_DIR: ${{ runner.temp }}/aisecbox-cli-bin
+      run: node "$GITHUB_ACTION_PATH/install-cli.js"
+
+    - name: Apply patch plan
+      id: patch
+      shell: bash
+      env:
+        CLI_BIN: ${{ steps.install.outputs.bin }}
+        PLAN: ${{ inputs.plan }}
+        DRY_RUN: ${{ inputs.dry_run }}
+        OVERRIDES: ${{ inputs.overrides }}
+        CREATE_PR: ${{ inputs.create_pr }}
+        WORKDIR: ${{ inputs.working_directory }}
+        DEBUG: ${{ inputs.debug }}
+        # AISECBOX_API_KEY, GITHUB_TOKEN y GH_TOKEN se heredan del `env` de la
+        # step que usa la action.
+      run: |
+        set -euo pipefail
+
+        if [ -z "${CLI_BIN:-}" ] || [ ! -f "$CLI_BIN" ]; then
+          echo "::error::aisecbox-cli was not installed correctly."
+          exit 1
+        fi
+        if [ -z "${PLAN:-}" ]; then
+          echo "::error::input 'plan' is required."
+          exit 1
+        fi
+        case "$OVERRIDES" in
+          auto|never) ;;
+          *) echo "::error::input 'overrides' must be 'auto' or 'never' (got '$OVERRIDES')."; exit 1 ;;
+        esac
+        case "$DRY_RUN" in
+          true|false) ;;
+          *) echo "::error::input 'dry_run' must be 'true' or 'false'."; exit 1 ;;
+        esac
+        case "$CREATE_PR" in
+          true|false) ;;
+          *) echo "::error::input 'create_pr' must be 'true' or 'false'."; exit 1 ;;
+        esac
+
+        if [ "$DEBUG" = "true" ]; then
+          export AISECBOX_CLI_DEBUG=1
+        fi
+
+        # Git Bash en Windows: normalizar separadores antes de mezclar rutas.
+        workspace="${GITHUB_WORKSPACE//\\//}"
+        tmp="${RUNNER_TEMP//\\//}"
+        if [ ! -d "$workspace/$WORKDIR" ]; then
+          echo "::error::working_directory '$WORKDIR' does not exist."
+          exit 1
+        fi
+        cd "$workspace/$WORKDIR"
+
+        repo_root="$(git rev-parse --show-toplevel)"
+        before="$tmp/aisecbox-status-before.txt"
+        after="$tmp/aisecbox-status-after.txt"
+        git -C "$repo_root" status --porcelain --untracked-files=no | sort > "$before"
+
+        args=(patch apply --message "$PLAN" --overrides "$OVERRIDES")
+        if [ "$DRY_RUN" = "true" ]; then
+          args+=(--dry-run)
+        fi
+        if [ "$CREATE_PR" = "true" ]; then
+          args+=(--create-pr)
+        fi
+
+        set +e
+        output="$("$CLI_BIN" "${args[@]}" 2>&1)"
+        status=$?
+        set -e
+        printf '%s\n' "$output"
+        if [ "$status" -ne 0 ]; then
+          exit "$status"
+        fi
+
+        git -C "$repo_root" status --porcelain --untracked-files=no | sort > "$after"
+        if [ -s "$before" ]; then
+          changed="$(grep -Fxv -f "$before" "$after" 2>/dev/null | sed -E 's/^.{3}//' || true)"
+        else
+          changed="$(sed -E 's/^.{3}//' "$after")"
+        fi
+
+        # El CLI imprime "Applied N patches, skipped M (...)". Quitar ANSI por si
+        # el runner no es TTY.
+        clean="$(printf '%s\n' "$output" | sed -E $'s/\x1B\\[[0-9;]*[A-Za-z]//g')"
+        applied=""
+        skipped=""
+        if [[ "$clean" =~ Applied[[:space:]]+([0-9]+)[[:space:]]+patches,[[:space:]]+skipped[[:space:]]+([0-9]+) ]]; then
+          applied="${BASH_REMATCH[1]}"
+          skipped="${BASH_REMATCH[2]}"
+        fi
+        pr_url="$(printf '%s\n' "$clean" | sed -nE 's/^Pull request: //p' | tail -n 1)"
+
+        if [ -n "$changed" ]; then
+          changed_flag=true
+        else
+          changed_flag=false
+        fi
+
+        {
+          echo "changed=$changed_flag"
+          echo "applied=$applied"
+          echo "skipped=$skipped"
+          echo "pr_url=$pr_url"
+          echo "changed_files<<AISECBOX_CHANGED_FILES"
+          printf '%s\n' "$changed"
+          echo "AISECBOX_CHANGED_FILES"
+        } >> "$GITHUB_OUTPUT"
