@@ -1,0 +1,61 @@
+name: Validate action
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Check installer syntax
+        run: node --check install-cli.js
+
+      - name: Validate action metadata
+        run: |
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet pyyaml
+          "$RUNNER_TEMP/venv/bin/python" - <<'PY'
+          import os
+          import subprocess
+          import sys
+          import yaml
+
+          doc = yaml.safe_load(open("action.yml", encoding="utf-8"))
+
+          if doc.get("runs", {}).get("using") != "composite":
+              sys.exit("action.yml must be a composite action")
+
+          expected = {
+              "plan",
+              "dry_run",
+              "overrides",
+              "create_pr",
+              "working_directory",
+              "debug",
+              "base_url",
+          }
+          missing = expected - set(doc.get("inputs", {}))
+          if missing:
+              sys.exit(f"missing inputs: {sorted(missing)}")
+
+          for step in doc["runs"]["steps"]:
+              name = step.get("name", "<unnamed>")
+              if "run" not in step or "shell" not in step:
+                  sys.exit(f"step {name!r} must have run and shell")
+              proc = subprocess.run(
+                  ["bash", "-n"], input=step["run"], text=True, capture_output=True
+              )
+              if proc.returncode != 0:
+                  sys.exit(f"bash syntax error in {name!r}: {proc.stderr}")
+              if "install-cli.js" in step["run"] and not os.path.isfile("install-cli.js"):
+                  sys.exit("install-cli.js is referenced but missing")
+
+          print("action.yml and install-cli.js OK")
+          PY
