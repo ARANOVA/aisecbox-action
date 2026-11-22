@@ -4,8 +4,7 @@ Composite action para aplicar un **plan de parches de dependencias de AiSecBox**
 con `aisecbox-cli` desde cualquier workflow de GitHub Actions, incluidos repos
 públicos.
 
-Es el equivalente a `goreleaser/goreleaser-action@v6` para esta tarea: una step
-con `with:` para la configuración no sensible y `env:` para los secretos.
+Una step con `with:` para la configuración no sensible y `env:` para los secretos.
 
 ```yaml
 - name: Apply AiSecBox patch plan
@@ -24,11 +23,6 @@ con `with:` para la configuración no sensible y `env:` para los secretos.
 La action **aplica** el plan; no ejecuta tests, build ni abre un PR salvo que se
 lo pidas con `create_pr: true`. Para el flujo completo con gate, el patrón
 recomendado es `apply -> test/build -> commit + PR` (ver más abajo).
-
-> Contenido de esta carpeta = raíz del repo público `ARANOVA/aisecbox-action`.
-> Copia `action.yml` e `install-cli.js` a la raíz de ese repo y etiqueta `v1`.
-> El repo `ARANOVA/aisecbox-cli` es privado, así que un repo público no puede
-> usar una action alojada en él.
 
 ## Requisitos
 
@@ -176,37 +170,3 @@ CLI imprime cabeceras y payloads; en un repo público los logs son públicos.
 - La action instala la **última release publicada** del CLI. Si necesitas una
   versión concreta, usa `base_url` con un mirror versionado o compila el CLI en
   tu workflow.
-
-## Estado actual de las releases
-
-La última release publicada del CLI, **v1.0.9**, no incluye `patch apply`. La
-action fallará con un mensaje explícito. Hasta que se publique una release con
-el comando, las alternativas son:
-
-- compilar el CLI desde el repo `ARANOVA/aisecbox-cli` en tu workflow (con
-  acceso al repo privado), o
-- esperar a la release y usar `@v1` tal cual.
-
-## Monorepos
-
-La action solo aplica el plan. El tidy de lockfiles, el build y los tests son
-responsabilidad del workflow llamador: en un monorepo con `go.work` tendrás que
-hacer `go mod tidy` por cada `go.mod` tocado y usar tus comandos (por ejemplo
-Nx). El workflow reutilizable de `aisecbox-cli` ya hace el tidy por módulo; si
-necesitas ese flujo completo, úsalo en lugar de la action.
-
-Ojo: la action no genera el plan. En un monorepo sin `go.mod` en la raíz, el
-escaneo actual del CLI (`scan dependencies`, no recursivo) no descubre los
-módulos Go; el gateway no podrá proponer parches para `apps/*/go.mod` hasta que
-exista soporte multi-módulo. Mientras tanto, el plan debe venir de otra vía.
-
-## Publicar la action
-
-1. Crea el repo público `ARANOVA/aisecbox-action` y copia `action.yml`,
-   `install-cli.js`, este README y `LICENSE`.
-2. `git tag v1.0.0 && git push origin v1`
-3. Tag móvil de major: `git tag -f v1 v1.0.0 && git push -f origin v1`
-4. Opcional: publicar en GitHub Marketplace desde la release `v1.0.0`.
-
-El `action.yml` no compila nada: la action es YAML + un instalador Node pequeño,
-auditable en el repo público.
